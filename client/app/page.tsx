@@ -1,3 +1,5 @@
+"use client"
+
 import React, { useEffect, useState } from "react";
 import { fetchTasks, createTask, updateTask, deleteTask, getSuggestion, Task } from "./api";
 import styles from "./page.module.css";

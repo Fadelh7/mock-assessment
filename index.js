@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const { Configuration, OpenAIApi } = require('openai');
+const mysql = require('mysql2/promise');
 
 // Load environment variables
 dotenv.config();
@@ -12,47 +13,96 @@ const port = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// In-memory task store
-let tasks = [];
-let nextId = 1;
+// MySQL connection pool
+const db = mysql.createPool({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  port: process.env.DB_PORT || 3306,
+});
+
+// Helper: get all tasks from DB
+async function getAllTasks() {
+  const [rows] = await db.query('SELECT * FROM tasks');
+  return rows;
+}
+
+// Helper: get task by id
+async function getTaskById(id) {
+  const [rows] = await db.query('SELECT * FROM tasks WHERE id = ?', [id]);
+  return rows[0];
+}
+
+// Helper: create task
+async function createTaskDB(title, description) {
+  const [result] = await db.query('INSERT INTO tasks (title, description) VALUES (?, ?)', [title, description]);
+  return { id: result.insertId, title, description };
+}
+
+// Helper: update task
+async function updateTaskDB(id, title, description) {
+  await db.query('UPDATE tasks SET title = ?, description = ? WHERE id = ?', [title, description, id]);
+  return getTaskById(id);
+}
+
+// Helper: delete task
+async function deleteTaskDB(id) {
+  await db.query('DELETE FROM tasks WHERE id = ?', [id]);
+}
 
 // CRUD Endpoints
-app.post('/tasks', (req, res) => {
+app.post('/tasks', async (req, res) => {
   const { title, description } = req.body;
-  const task = { id: nextId++, title, description };
-  tasks.push(task);
-  res.status(201).json(task);
+  try {
+    const task = await createTaskDB(title, description);
+    res.status(201).json(task);
+  } catch (err) {
+    res.status(500).json({ error: 'DB error', details: err.message });
+  }
 });
 
-app.get('/tasks', (req, res) => {
-  res.json(tasks);
+app.get('/tasks', async (req, res) => {
+  try {
+    const tasks = await getAllTasks();
+    res.json(tasks);
+  } catch (err) {
+    res.status(500).json({ error: 'DB error', details: err.message });
+  }
 });
 
-app.patch('/tasks/:id', (req, res) => {
+app.patch('/tasks/:id', async (req, res) => {
   const id = parseInt(req.params.id);
-  const task = tasks.find(t => t.id === id);
-  if (!task) return res.status(404).json({ error: 'Task not found' });
   const { title, description } = req.body;
-  if (title !== undefined) task.title = title;
-  if (description !== undefined) task.description = description;
-  res.json(task);
+  try {
+    const task = await getTaskById(id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    const updated = await updateTaskDB(id, title ?? task.title, description ?? task.description);
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ error: 'DB error', details: err.message });
+  }
 });
 
-app.delete('/tasks/:id', (req, res) => {
+app.delete('/tasks/:id', async (req, res) => {
   const id = parseInt(req.params.id);
-  const index = tasks.findIndex(t => t.id === id);
-  if (index === -1) return res.status(404).json({ error: 'Task not found' });
-  tasks.splice(index, 1);
-  res.status(204).send();
+  try {
+    const task = await getTaskById(id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    await deleteTaskDB(id);
+    res.status(204).send();
+  } catch (err) {
+    res.status(500).json({ error: 'DB error', details: err.message });
+  }
 });
 
 // AI Suggestion Endpoint
 app.post('/tasks/:id/suggest', async (req, res) => {
   const id = parseInt(req.params.id);
-  const task = tasks.find(t => t.id === id);
-  if (!task) return res.status(404).json({ error: 'Task not found' });
-
   try {
+    const task = await getTaskById(id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+
     const configuration = new Configuration({ apiKey: process.env.OPENAI_API_KEY });
     const openai = new OpenAIApi(configuration);
     const prompt = `Given the following task description, suggest a priority (High, Medium, Low) and a due date (if possible):\n\n${task.description}`;
